@@ -1,0 +1,98 @@
+# before_script:
+#   - BRANCH__SHORT_NAME="$(echo $CI_COMMIT_REF_NAME | cut -d _ -f 1 | tr '[:upper:]' '[:lower:]')"
+
+stages:
+  - test
+  - publish_image
+  - deploy_image
+
+test-job:
+  stage: test
+  variables:
+    GIT_STRATEGY: none
+  script:
+    - echo ".gitlab-ci.yml added for successful merge"
+
+publish-image-job:
+  before_script:
+    - BRANCH_SHORT_NAME="$(echo $CI_COMMIT_REF_NAME | cut -d _ -f 1 | tr '[:upper:]' '[:lower:]')"
+    - REPOSITORY_URL="$(echo $CI_REGISTRY_IMAGE/$BRANCH_SHORT_NAME)"
+  stage: publish_image
+  image: docker:stable
+  # image: docker:stable
+  services:
+    - docker:20.10.6-dind
+    # - docker:dind
+  variables:
+    DOCKER_DRIVER: overlay2
+  script:
+    - env
+    - echo $BRANCH_SHORT_NAME
+    - echo $CI_COMMIT_SHORT_SHA
+    - echo $CI_REGISTRY_IMAGE # registry.gitlab.com/collabera-ces/ava/iaf/gitlab_test
+    - echo "$CI_REGISTRY_IMAGE/$BRANCH_SHORT_NAME:$CI_COMMIT_SHORT_SHA"
+    - cat /etc/os-release
+    - echo $DEPLOY_TOKEN_IAF_PASSWORD
+    # - hostnamectl
+    - docker info
+    - docker build -t $REPOSITORY_URL .
+    - docker tag $REPOSITORY_URL:latest $REPOSITORY_URL:$CI_COMMIT_SHORT_SHA
+    - docker login -u deploy_token_iaf_user -p e6yvxXeysfZmPk1cYTRw registry.gitlab.com
+    - docker push $REPOSITORY_URL:latest
+    - docker push $REPOSITORY_URL:$CI_COMMIT_SHORT_SHA
+  # artifacts:
+  #   reports:
+  #     dotenv: publish_image.env
+
+deploy-image-job:
+  before_script:
+    - BRANCH_SHORT_NAME="$(echo $CI_COMMIT_REF_NAME | cut -d _ -f 1 | tr '[:upper:]' '[:lower:]')"
+    - REPOSITORY_URL="$(echo $CI_REGISTRY_IMAGE/$BRANCH_SHORT_NAME)"
+  # dependencies:
+  #   - publish_image
+  stage: deploy_image
+  image: docker:stable
+  # image: docker:stable
+  services:
+    - docker:20.10.6-dind
+    # - docker:dind
+  variables:
+    DOCKER_DRIVER: overlay2
+    HOST_NAME: ec2-18-221-62-214.us-east-2.compute.amazonaws.com
+  script:
+    - cat PublicEC2.pem
+    - chmod 400 PublicEC2.pem
+    # Create the SSH directory and give it the right permissions
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    # Add the instance to the list of authorized hosts
+    - eval "$(ssh-agent -s)"
+    - ssh-keyscan -H $HOST_NAME >> ~/.ssh/known_hosts
+    - chmod 644 ~/.ssh/known_hosts
+ # ssh -i "PublicEC2.pem" ec2-user@ec2-18-221-62-214.us-east-2.compute.amazonaws.com
+    - echo "Executing commands for deployment on host"
+    - |
+      ssh -X -i "./PublicEC2.pem" ec2-user@$HOST_NAME IMAGE_NAME="$REPOSITORY_URL:$CI_COMMIT_SHORT_SHA" CONTAINER_NAME="iaf_ui" 'bash -s' <<'ENDSSH'
+
+          # commands to run on remote host
+          echo IMAGE_NAME:$IMAGE_NAME CONTAINER_NAME:$CONTAINER_NAME > /tmp/deploy_log
+
+          echo "Stopping container $CONTAINER_NAME" && \
+          sudo docker stop $CONTAINER_NAME &> /dev/null || true
+
+          echo "Removing container $CONTAINER_NAME" && \
+          sudo docker rm -f $CONTAINER_NAME &> /dev/null || true
+
+          echo "Docker Login to $IMAGE_NAME" && \
+          sudo docker login -u deploy_token_iaf_user -p e6yvxXeysfZmPk1cYTRw registry.gitlab.com &> /dev/null
+
+          echo "Docker Pull image $IMAGE_NAME" && \
+          sudo docker pull $IMAGE_NAME &> /dev/null || true
+
+          echo Initiating deploy of Image $IMAGE_NAME >> /tmp/deploy_log
+
+          sudo echo "Starting new instance of the container $CONTAINER_NAME" && \
+          sudo docker run --name $CONTAINER_NAME -e NODE_ENV='production' -p 8080:4200 -itd $IMAGE_NAME >> /tmp/deploy_log
+
+      ENDSSH
+    - echo "This is successfull 👍"

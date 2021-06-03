@@ -1,0 +1,18 @@
+plugins:
+  sonar-java:
+    enabled: true
+    config:
+      sonar.java.source: "7"
+      minimum_severity: minor
+        # - minor
+      tests_patterns:
+        - tdm/tdm/src/**
+        - tdm/tdm/app/src/**
+exclude_patterns:
+  - tdm/tdm/.mvn
+  - tdm/tdm/.idea
+  - tdm/tdm/.settings
+  - tdm/tdm/out
+  - tdm/tdm/target
+  - tdm/tdm/*.xml
+  - tdm/tdm/*.iml

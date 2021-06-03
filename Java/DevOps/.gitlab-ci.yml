@@ -1,0 +1,462 @@
+# cache:
+#   paths:
+#     - maven.repository/
+
+image: docker:stable
+services:
+  - docker:dind
+
+variables:
+  # DOCKER_DRIVER: overlay
+  # SPRING_PROFILES_ACTIVE: gitlab-ci
+  # MAVEN_OPTS: "-Djava.awt.headless=true -Dmaven.repo.local=maven.repository/"
+  # MAVEN_OPTS: "-Xmx512m"
+  MAVEN_CLI_OPTS: "--batch-mode --errors --fail-at-end --show-version"
+
+
+include:
+  template: Code-Quality.gitlab-ci.yml
+
+
+stages:
+  - build
+  - test
+  - visualize
+  - package
+  - image_scan
+  - deploy
+  # - test_image
+  # - check_results
+  # - build_update
+  # - test_update
+  # - check_results_update
+
+
+maven-build:
+  image: maven:3.8-openjdk-11-slim  # image: maven:3-jdk-8
+  # image: maven:3.8.1-jdk-11  # image: maven:3-jdk-8
+  stage: build
+  script: "mvn -f ./tdm/tdm/pom.xml $MAVEN_CLI_OPTS clean package"
+  artifacts:
+    paths:
+      - ./tdm/tdm/target/*.jar
+
+
+
+
+code_quality:
+  stage: test
+  variables:
+    # SOURCE_CODE: ./tdm/tdm/src/
+    # REPORT_FORMAT: html
+    REPORT_FORMAT: json
+  artifacts:
+    paths: [gl-code-quality-report.json]
+
+maven-unit-test:
+  image: maven:3.8-openjdk-11-slim
+  # image: maven:3.8.1-jdk-11
+  stage: test
+  script:
+    - mvn -f ./tdm/tdm/pom.xml $MAVEN_CLI_OPTS test
+    # - mvn -f ./tdm/tdm/pom.xml $MAVEN_CLI_OPTS clean test
+    # - mvn -f ./tdm/tdm/pom.xml $MAVEN_CLI_OPTS clean test -P unit-test
+  artifacts:
+    paths:
+      - ./tdm/tdm/target/*
+
+junit-test_reports:
+# maven-junit-test-report:
+  image: maven:3.8-openjdk-11-slim
+  stage: test
+  script:
+    - mvn -f ./tdm/tdm/pom.xml test
+  artifacts:
+    when: always
+    paths:
+        - ./tdm/tdm/target/surefire-reports/TEST-*.xml
+        - ./tdm/tdm/target/failsafe-reports/TEST-*.xml
+    reports:
+      junit:
+        - ./tdm/tdm/target/surefire-reports/TEST-*.xml
+        - ./tdm/tdm/target/failsafe-reports/TEST-*.xml
+
+code-coverage-jdk11:
+  stage: test
+  image: maven:3.8-openjdk-11-slim
+  script:
+    - 'mvn $MAVEN_CLI_OPTS -X -f ./tdm/tdm/pom.xml clean org.jacoco:jacoco-maven-plugin:0.8.6:prepare-agent test org.jacoco:jacoco-maven-plugin:0.8.6:report'
+  artifacts:
+    paths:
+      - ./tdm/tdm/target/site/jacoco/jacoco.xml
+
+sonarqube-check:
+  image: maven:3.6.3-jdk-11
+  stage: test
+  variables:
+    SONAR_USER_HOME: "${CI_PROJECT_DIR}/tdm/tdm/.sonar"  # Defines the location of the analysis task cache
+    GIT_DEPTH: "0"  # Tells git to fetch all the branches of the project, required by the analysis task
+  cache:
+    key: "${CI_JOB_NAME}"
+    paths:
+      - .sonar/cache
+  script:
+    - env
+    - echo $MAVEN_HOME
+    - ls -ltr $MAVEN_HOME/conf
+    - cat $MAVEN_HOME/conf/settings.xml
+    - ls -lrta ~/.m2
+    - echo the CI_JOB_NAME value is "${CI_JOB_NAME}"
+    # - mvn clean verify sonar:sonar -Dsonar.login=myAuthenticationToken
+    - mvn -f ./tdm/tdm/pom.xml $MAVEN_CLI_OPTS clean install
+    # - mvn sonar:sonar -Dsonar.login=myAuthenticationToken
+    # - mvn sonar:sonar -Dsonar.login="${SONAR_TOKEN}"
+    # - mvn org.sonarsource.scanner.maven:sonar-maven-plugin:3.9.0.2155:sonar
+    - mvn -f ./tdm/tdm/pom.xml $MAVEN_CLI_OPTS sonar:sonar -Dsonar.projectKey=tdm -Dsonar.host.url=http://ec2-3-14-151-16.us-east-2.compute.amazonaws.com:9000 -Dsonar.login=b58fd3662d2fbe34def816dcc9afad48aae08628
+    # - mvn verify sonar:sonar -Dsonar.qualitygate.wait=true
+  allow_failure: true
+  # only:
+    # - merge_requests
+    # - feature/TIQE-336
+    # - master
+    # - develop
+
+
+
+
+
+
+
+
+
+coverage-visualize-jdk11:
+  # Must be in a stage later than code-coverage-jdk11's stage.
+  # The `visualize` stage does not exist by default.
+  # Please define it first, or chose an existing stage like `deploy`.
+  stage: visualize
+  image: registry.gitlab.com/haynes/jacoco2cobertura:1.0.7
+  script:
+    - pwd ; ls -ltr
+    - ls -ltr ./tdm/tdm/target/
+    # convert report from jacoco to cobertura
+    - 'python /opt/cover2cover.py ./tdm/tdm/target/site/jacoco/jacoco.xml ./tdm/tdm/src/main/java > ./tdm/tdm/target/site/cobertura.xml'
+    # read the <source></source> tag and prepend the path to every filename attribute
+    - 'python /opt/source2filename.py ./tdm/tdm/target/site/cobertura.xml'
+  needs: ["code-coverage-jdk11"]
+  dependencies:
+    - code-coverage-jdk11
+  artifacts:
+    paths:
+      - ./tdm/tdm/target/site/cobertura.xml
+    reports:
+      cobertura: ./tdm/tdm/target/site/cobertura.xml
+
+# https://hackage.haskell.org/package/hadolint
+#dockerfile-lint:
+  # image: docker:stable
+  # stage: package
+  # variables:
+  #   IMAGE: $CI_REGISTRY_IMAGE/$CI_COMMIT_REF_SLUG:$CI_COMMIT_SHA
+  #   DOCKER_DRIVER: overlay2
+  #   # IMAGE: $CI_REGISTRY_IMAGE/$CI_COMMIT_REF_SLUG:$CI_COMMIT_SHA
+  # # script:
+  # #   - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" $CI_REGISTRY
+  # #   - docker build -t $IMAGE .
+  # #   - docker push $IMAGE
+  # script:
+  #   - IMAGE_TAG="$(echo $CI_COMMIT_SHA | head -c 8)"
+  #   - export
+  #   # - cd ./tdm/tdm/
+  #   - docker info
+  #   # - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" $CI_REGISTRY
+  #   - echo "USER - $CI_REGISTRY_USER  , PWD - $CI_REGISTRY_PASSWORD , REGISTRY - $CI_REGISTRY "
+  #   - echo "BUILD TOKEN - $CI_BUILD_TOKEN "
+  #   # - docker login -u GITLAB_CI_DEPLOY_TOKEN -p $CI_BUILD_TOKEN registry.gitlab.com
+  #   - docker login -u gitlab-ci-token -p $CI_BUILD_TOKEN registry.gitlab.com
+  #   # - docker build -t ava_ita_tdm:latest .
+  #   # - docker tag ava_ita_tdm:latest ava_ita_tdm:$IMAGE_TAG
+  #   - docker build -t $IMAGE ./tdm/tdm/
+  #   - docker image ls
+  #   - docker push $IMAGE
+
+package-image:
+  image: docker:stable
+  stage: package
+  variables:
+    IMAGE: $CI_REGISTRY_IMAGE/$CI_COMMIT_REF_SLUG:$CI_COMMIT_SHA
+    DOCKER_DRIVER: overlay2
+    # IMAGE: $CI_REGISTRY_IMAGE/$CI_COMMIT_REF_SLUG:$CI_COMMIT_SHA
+  # script:
+  #   - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" $CI_REGISTRY
+  #   - docker build -t $IMAGE .
+  #   - docker push $IMAGE
+  script:
+    - IMAGE_TAG="$(echo $CI_COMMIT_SHA | head -c 8)"
+    - export
+    # - cd ./tdm/tdm/
+    - docker info
+    # - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" $CI_REGISTRY
+    - echo "USER - $CI_REGISTRY_USER  , PWD - $CI_REGISTRY_PASSWORD , REGISTRY - $CI_REGISTRY "
+    - echo "BUILD TOKEN - $CI_BUILD_TOKEN "
+    # - docker login -u GITLAB_CI_DEPLOY_TOKEN -p $CI_BUILD_TOKEN registry.gitlab.com
+    - docker login -u gitlab-ci-token -p $CI_BUILD_TOKEN registry.gitlab.com
+    # - docker build -t ava_ita_tdm:latest .
+    # - docker tag ava_ita_tdm:latest ava_ita_tdm:$IMAGE_TAG
+    - docker build -t $IMAGE ./tdm/tdm/
+    - docker image ls
+    - docker push $IMAGE
+    # - docker save ava_ita_tdm:latest
+    # - ls -sh *.tar
+  # artifacts:
+  #   paths:
+  #     - ./tdm/tdm/*.tar
+  # - docker build -t registry.gitlab.com/marcolenzo/actuator-sample .
+  # - docker login -u gitlab-ci-token -p $CI_BUILD_TOKEN registry.gitlab.com
+  # - docker push registry.gitlab.com/marcolenzo/actuator-sample
+
+# GITLAB_CI_DEPLOY_TOKEN:8zeBne57J4zsRGiznLvd
+
+container_scanning:
+  image: docker:stable
+  stage: image_scan
+  variables:
+    DOCKER_DRIVER: overlay2
+    ## Define two new variables based on GitLab's CI/CD predefined variables
+    ## https://docs.gitlab.com/ee/ci/variables/#predefined-environment-variables
+    CI_APPLICATION_REPOSITORY: $CI_REGISTRY_IMAGE/$CI_COMMIT_REF_SLUG
+    CI_APPLICATION_TAG: $CI_COMMIT_SHA
+  allow_failure: true
+  services:
+    - docker:stable-dind
+  script:
+    - docker run -d --name db arminc/clair-db:latest
+    - docker run -p 6060:6060 --link db:postgres -d --name clair --restart on-failure arminc/clair-local-scan:v2.0.1
+    - apk add -U wget ca-certificates
+    - docker login -u gitlab-ci-token -p $CI_BUILD_TOKEN $CI_REGISTRY
+    - docker pull ${CI_APPLICATION_REPOSITORY}:${CI_APPLICATION_TAG}
+    - wget https://github.com/arminc/clair-scanner/releases/download/v8/clair-scanner_linux_amd64
+    - mv clair-scanner_linux_amd64 clair-scanner
+    - chmod +x clair-scanner
+    - touch clair-whitelist.yml
+    - while( ! wget -q -O /dev/null http://docker:6060/v1/namespaces ) ; do sleep 1 ; done
+    - retries=0
+    - echo "Waiting for clair daemon to start"
+    - while( ! wget -T 10 -q -O /dev/null http://docker:6060/v1/namespaces ) ; do sleep 1 ; echo -n "." ; if [ $retries -eq 10 ] ; then echo " Timeout, aborting." ; exit 1 ; fi ; retries=$(($retries+1)) ; done
+    - ./clair-scanner -c http://docker:6060 --ip $(hostname -i) -r gl-container-scanning-report.json -l clair.log -w clair-whitelist.yml ${CI_APPLICATION_REPOSITORY}:${CI_APPLICATION_TAG} || true
+  artifacts:
+    reports:
+      container_scanning: gl-container-scanning-report.json
+
+
+
+deploy:
+  stage: deploy
+  script:
+    # - cp $ec2_key_file EC2.pem
+    # - cat PrivateEC2.pem | tr -d '\r' > PrivateEC2.pem
+    - cat PrivateEC2.pem
+    - chmod 400 PrivateEC2.pem
+    # Create the SSH directory and give it the right permissions
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - ls -ltra
+    # Add the instance to the list of authorized hosts
+    - eval "$(ssh-agent -s)"
+    - ssh-keyscan -H ec2-18-216-225-229.us-east-2.compute.amazonaws.com >> ~/.ssh/known_hosts
+    - chmod 644 ~/.ssh/known_hosts
+    # Test ssh connection as a script execution
+    - echo "Establishing a connection test"
+    - |
+      ssh -X -i "./PrivateEC2.pem" ec2-user@ec2-18-216-225-229.us-east-2.compute.amazonaws.com IMAGE_NAME="registry.gitlab.com/collabera-ces/ava/ita/test_repo/feature-tiqe-336:040ee6954abbb79a84cf15ded37281b006a849bb" CONTAINER_NAME="tdm" 'bash -s' <<'ENDSSH'
+          # commands to run on remote host
+          echo $IMAGE_NAME $CONTAINER_NAME > /tmp/test_details
+      ENDSSH
+    # ENDSSH > connection_test.log
+    # | tee -a connection_test.log
+    # Copy script into the remote server
+    - cat gitlab-deploy/gitlab-deploy.development.sh
+    - echo "Copying a deployment script to the remote server"
+    - ls -ltra
+    - chmod 777 gitlab-deploy/gitlab-deploy.development.sh
+    - scp -i "./PrivateEC2.pem" -r ./gitlab-deploy/gitlab-deploy.development.sh ec2-user@ec2-18-216-225-229.us-east-2.compute.amazonaws.com:~
+    # Execute copied script on the remote server
+    - echo "Executing the deploment script"
+    # - |
+    - pwd ; ls -ltr
+    - ssh -i "./PrivateEC2.pem" ec2-user@ec2-18-216-225-229.us-east-2.compute.amazonaws.com "./gitlab-deploy.development.sh"
+      # status=$?
+      #
+      # if $status; then
+      # echo "deployment successfull"
+      # else
+      # echo "deployment failed"
+      # fi
+    - echo "This is successfull 👍"
+
+
+
+# include:
+#   template: Container-Scanning.gitlab-ci.yml
+
+
+# containerscan:anchorescan:
+#   stage: image_scan
+#   image: docker.io/anchore/enterprise-gitlab-scan:v1
+#   variables:
+#     ANCHORE_IMAGE: "${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHA}"
+#   script:
+#     - anchore-gitlab-scan > gl-container-scanning-report.json
+#   artifacts:
+#     reports:
+#       container_scanning: gl-container-scanning-report.json
+
+
+
+# Build vulnerable Docker image
+# -----------------------------
+
+# build:
+#   stage: build_image
+#   image:
+#     name: gitlab-registry.cern.ch/ci-tools/docker-image-builder
+#     entrypoint: [""]
+#   script:
+#     - echo "{\"auths\":{\"$CI_REGISTRY\":{\"username\":\"$CI_REGISTRY_USER\",\"password\":\"$CI_REGISTRY_PASSWORD\"}}}" > /kaniko/.docker/config.json
+#     - /kaniko/executor --context $CI_PROJECT_DIR --dockerfile $CI_PROJECT_DIR/Dockerfile --destination $CI_REGISTRY_IMAGE:$vulnerable_tag
+#
+#
+#
+# # Scan Docker container for vulnerabilities
+# # -----------------------------------------
+#
+# # Please note that this will only show vulnerabilities during build time.
+# # Image needs to be rebuilt regularly to detect new vulverabilities.
+# # upstream doc: https://docs.gitlab.com/ee/user/application_security/container_scanning/
+# include:
+#   template: Container-Scanning.gitlab-ci.yml
+# # the container_scanning job template needs to be extended to work in CERN environment
+# container_vulnerability_scanning:
+#   extends: container_scanning
+#   stage: test_image
+#   tags:
+#   # privileged runners need to be explicitly requested
+#   - docker-privileged
+#   variables:
+#     CI_APPLICATION_REPOSITORY: $CI_REGISTRY_IMAGE
+#     # needs to match the tag built in the build stage
+#     CI_APPLICATION_TAG: $vulnerable_tag
+#   # run the scanning job even if GitLab doesn't support analysis of scan result
+#   rules:
+#     - if: '$CI =~ /.*/'
+#       when: always
+#   # Required to pass the results to the result stage
+#   artifacts:
+#     paths:
+#       - gl-container-scanning-report.json
+#
+#
+# # Check scanning results
+# # ----------------------
+#
+# # Check if the previous scanning reported any vulnerability
+# scanning_results:
+#   stage: check_results
+#   image: gitlab-registry.cern.ch/ci-tools/ci-worker:cc7
+#   script:
+#   # Use a simple jq command to check vulnerabilities in the previous JSON report
+#   - jq -e "( .vulnerabilities | length ) > 0" ./gl-container-scanning-report.json
+#   dependencies:
+#     - container_vulnerability_scanning
+#   # Comment if you want job to ignore if there are vulnerabilities
+#   allow_failure: true
+#
+#
+# # Build Docker image without vulnerabilities
+# # ------------------------------------------
+#
+# # This time build an image updating packages
+# build_update:
+#   stage: build_update
+#   image:
+#     name: gitlab-registry.cern.ch/ci-tools/docker-image-builder
+#     entrypoint: [""]
+#   script:
+#     - echo "{\"auths\":{\"$CI_REGISTRY\":{\"username\":\"$CI_REGISTRY_USER\",\"password\":\"$CI_REGISTRY_PASSWORD\"}}}" > /kaniko/.docker/config.json
+#     - /kaniko/executor --context $CI_PROJECT_DIR --dockerfile $CI_PROJECT_DIR/Dockerfile_upgrade --destination $CI_REGISTRY_IMAGE:$non_vulnerable_tag
+#
+#
+# # Scan Docker container for vulnerabilities on updated image
+# # ----------------------------------------------------------
+#
+# container_vulnerability_scanning_update:
+#   extends: container_scanning
+#   stage: test_update
+#   tags:
+#   # privileged runners need to be explicitly requested
+#   - docker-privileged
+#   variables:
+#     CI_APPLICATION_REPOSITORY: $CI_REGISTRY_IMAGE
+#     # needs to match the tag built in the build stage
+#     CI_APPLICATION_TAG: $non_vulnerable_tag
+#   # run the scanning job even if GitLab doesn't support analysis of scan result
+#   rules:
+#     - if: '$CI =~ /.*/'
+#       when: always
+#   # Required to pass the results to the result stage
+#   artifacts:
+#     paths:
+#       - gl-container-scanning-report.json
+#
+#
+#
+# # Check scanning results for updated image
+# # ----------------------------------------
+#
+# # Check if the previous scanning reported any vulnerability
+# scanning_results_update:
+#   stage: check_results_update
+#   image: gitlab-registry.cern.ch/ci-tools/ci-worker:cc7
+#   script:
+#   # Use a simple jq command to check vulnerabilities in the previous JSON report
+#   - jq -e "( .vulnerabilities | length ) > 0" ./gl-container-scanning-report.json
+#   dependencies:
+#     - container_vulnerability_scanning_update
+#
+#
+
+# ----------------------------------
+# cache:
+#   paths:
+#     - maven.repository/
+#
+#
+# variables:
+#   MAVEN_OPTS: "-Djava.awt.headless=true -Dmaven.repo.local=maven.repository/"
+#   MAVEN_CLI_OPTS: "--batch-mode --errors --fail-at-end --show-version"
+#   REPOSITORY_URL: 480189430442.dkr.ecr.ap-southeast-2.amazonaws.com/temperature
+#
+# stages:
+#   - unit-test
+#   - integration-test
+#
+# maven-unit-test:
+#   image: maven:3-jdk-11
+#   stage: unit-test
+#   script:
+#     - mvn $MAVEN_CLI_OPTS clean test -P unit-test
+#
+# maven-integration-test:
+#   image: maven:3-jdk-11
+#   services:
+#     - name: amazon/dynamodb-local
+#       alias: dynamodblocal
+#   stage: integration-test
+#   script:
+#     - mvn $MAVEN_CLI_OPTS install -P integration-test -Dspring.profiles.active=CI -Dskip.startlocaldynamo=true
+#     - mkdir target/dependency
+#     - (cd target/dependency; jar -xf ../*.jar)
+#   artifacts:
+#     paths:
+#       - target/*.jar
+#       - target/dependency
+#       - target/cucumber-reports/cucumber-html-reports/*
